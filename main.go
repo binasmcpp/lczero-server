@@ -153,28 +153,42 @@ func nextGame(c *gin.Context) {
 	}
 	if len(match) > 0 {
 		// Return this match
-		matchGame := db.MatchGame{
+		matchGame1 := db.MatchGame{
 			UserID:  user.ID,
 			MatchID: match[0].ID,
 		}
-		err = db.GetDB().Create(&matchGame).Error
-		// Note, this could cause an imbalance of white/black games for a particular match,
-		// but it's good enough for now.
-		flip := (matchGame.ID & 1) == 1
-		db.GetDB().Model(&matchGame).Update("flip", flip)
+		err = db.GetDB().Create(&matchGame1).Error
 		if err != nil {
 			log.Println(err)
 			c.String(500, "Internal error 3")
 			return
 		}
+		// Now, it will not cause an imbalance of white/black games
+		flip1 := (matchGame1.ID & 1) == 1
+		db.GetDB().Model(&matchGame1).Update("flip", flip1)
+
+		flip2 := !flip1
+		matchGame2 := db.MatchGame{
+			UserID:  user.ID,
+			MatchID: match[0].ID,
+			Flip:    flip2,
+		}
+		err = db.GetDB().Create(&matchGame2).Error
+		if err != nil {
+			log.Println(err)
+			c.String(500, "Internal error 3")
+			return
+		}
+
 		result := gin.H{
 			"type":         "match",
-			"matchGameId":  matchGame.ID,
+			"matchGameId1": matchGame1.ID,
+			"matchGameId2": matchGame2.ID,
 			"sha":          match[0].CurrentBest.Sha,
 			"candidateSha": match[0].Candidate.Sha,
 			"params":       match[0].Parameters,
 			"bookUrl":      trainingRun.MatchBook,
-			"flip":         flip,
+			"flip":         flip1,
 		}
 		c.JSON(http.StatusOK, result)
 		return
@@ -828,23 +842,38 @@ func matchResult(c *gin.Context) {
 		c.String(http.StatusBadRequest, err.Error())
 		return
 	}
-	match_game_id, err := strconv.ParseUint(c.PostForm("match_game_id"), 10, 32)
+	match_game_id1, err := strconv.ParseUint(c.PostForm("match_game_id1"), 10, 32)
 	if err != nil {
 		log.Println(err)
-		c.String(http.StatusBadRequest, "Invalid match_game_id")
+		c.String(http.StatusBadRequest, "Invalid match_game_id1")
 		return
 	}
 
-	var match_game db.MatchGame
-	err = db.GetDB().Where("id = ?", match_game_id).First(&match_game).Error
+	var match_game1 db.MatchGame
+	err = db.GetDB().Where("id = ?", match_game_id1).First(&match_game1).Error
 	if err != nil {
 		log.Println(err)
-		c.String(http.StatusBadRequest, "Invalid match_game")
+		c.String(http.StatusBadRequest, "Invalid match_game1")
+		return
+	}
+
+	match_game_id2, err := strconv.ParseUint(c.PostForm("match_game_id2"), 10, 32)
+	if err != nil {
+		log.Println(err)
+		c.String(http.StatusBadRequest, "Invalid match_game_id2")
+		return
+	}
+
+	var match_game2 db.MatchGame
+	err = db.GetDB().Where("id = ?", match_game_id2).First(&match_game2).Error
+	if err != nil {
+		log.Println(err)
+		c.String(http.StatusBadRequest, "Invalid match_game2")
 		return
 	}
 
 	var match db.Match
-	err = db.GetDB().Where("id = ?", match_game.MatchID).First(&match).Error
+	err = db.GetDB().Where("id = ?", match_game1.MatchID).First(&match).Error
 	if err != nil {
 		log.Println(err)
 		c.String(http.StatusBadRequest, "Invalid match_game, no matching match.")
@@ -857,24 +886,51 @@ func matchResult(c *gin.Context) {
 		return
 	}
 
-	result, err := strconv.ParseInt(c.PostForm("result"), 10, 32)
+	// check result
+	result1, err := strconv.ParseInt(c.PostForm("result1"), 10, 32)
 	if err != nil {
 		log.Println(err)
-		c.String(http.StatusBadRequest, "Unable to parse result")
+		c.String(http.StatusBadRequest, "Unable to parse result1")
 		return
 	}
 
-	good_result := result == 0 || result == -1 || result == 1
-	if !good_result {
-		c.String(http.StatusBadRequest, "Bad result")
+	good_result1 := result1 == 0 || result1 == -1 || result1 == 1
+	if !good_result1 {
+		c.String(http.StatusBadRequest, "Bad result1")
 		return
 	}
 
-	err = db.GetDB().Model(&match_game).Updates(db.MatchGame{
+	result2, err := strconv.ParseInt(c.PostForm("result2"), 10, 32)
+	if err != nil {
+		log.Println(err)
+		c.String(http.StatusBadRequest, "Unable to parse result2")
+		return
+	}
+
+	good_result2 := result2 == 0 || result2 == -1 || result2 == 1
+	if !good_result2 {
+		c.String(http.StatusBadRequest, "Bad result2")
+		return
+	}
+
+	// update database
+	err = db.GetDB().Model(&match_game1).Updates(db.MatchGame{
 		Version:       uint(version),
-		Result:        int(result),
+		Result:        int(result1),
 		Done:          true,
-		Pgn:           c.PostForm("pgn"),
+		Pgn:           c.PostForm("pgn1"),
+		EngineVersion: c.PostForm("engineVersion"),
+	}).Error
+	if err != nil {
+		log.Println(err)
+		c.String(500, "Internal error")
+		return
+	}
+	err = db.GetDB().Model(&match_game2).Updates(db.MatchGame{
+		Version:       uint(version),
+		Result:        int(result2),
+		Done:          true,
+		Pgn:           c.PostForm("pgn2"),
 		EngineVersion: c.PostForm("engineVersion"),
 	}).Error
 	if err != nil {
@@ -883,30 +939,34 @@ func matchResult(c *gin.Context) {
 		return
 	}
 
-	col := ""
-	if result == 0 {
-		col = "draws"
-	} else if result == 1 {
-		col = "wins"
-	} else {
-		col = "losses"
+	// update game count
+	var results = []int64{result1, result2}
+	for _, result := range results {
+		col := ""
+		if result == 0 {
+			col = "draws"
+		} else if result == 1 {
+			col = "wins"
+		} else {
+			col = "losses"
+		}
+		// Atomic update of game count
+		err = db.GetDB().Exec(fmt.Sprintf("UPDATE matches SET %s = %s + 1 WHERE id = ?", col, col), match.ID).Error
+		if err != nil {
+			log.Println(err)
+			c.String(500, "Internal error")
+			return
+		}
 	}
-	// Atomic update of game count
-	err = db.GetDB().Exec(fmt.Sprintf("UPDATE matches SET %s = %s + 1 WHERE id = ?", col, col), match_game.MatchID).Error
+
+	err = checkMatchFinished(match.ID)
 	if err != nil {
 		log.Println(err)
 		c.String(500, "Internal error")
 		return
 	}
 
-	err = checkMatchFinished(match_game.MatchID)
-	if err != nil {
-		log.Println(err)
-		c.String(500, "Internal error")
-		return
-	}
-
-	c.String(http.StatusOK, fmt.Sprintf("Match game %d successfuly uploaded from user=%s.", match_game.ID, user.Username))
+	c.String(http.StatusOK, fmt.Sprintf("Match game %d successfuly uploaded from user=%s.", match.ID, user.Username))
 }
 
 func getActiveUsers(userLimit int) (gin.H, error) {
@@ -1460,7 +1520,11 @@ func viewNetworks(c *gin.Context) {
 	counts := getNetworkCounts(networks)
 	json := []gin.H{}
 	if c.DefaultQuery("show_all", "1") == "0" {
-		networks = networks[0:99]
+		len := len(networks)
+		if len > 100 {
+			len = 100
+		}
+		networks = networks[0:len]
 	}
 	for _, network := range networks {
 		json = append(json, gin.H{
@@ -1587,7 +1651,11 @@ func viewMatches(c *gin.Context) {
 		err = db.GetDB().Order("id desc").Where("training_run_id = ?", run).Find(&matches).Error
 	}
 	if c.DefaultQuery("show_all", "1") == "0" {
-		matches = matches[0:99]
+		len := len(matches)
+		if len > 100 {
+			len = 100
+		}
+		matches = matches[0:len]
 	}
 	if err != nil {
 		log.Println(err)
