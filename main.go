@@ -28,6 +28,8 @@ import (
 	"github.com/jinzhu/gorm"
 )
 
+var lastRefreshTime = time.Now()
+
 func checkUser(c *gin.Context) (*db.User, *db.Client, uint64, error) {
 	if len(c.PostForm("user")) == 0 {
 		return nil, nil, 0, errors.New("No user supplied")
@@ -263,7 +265,7 @@ func getTrainingRun(trainingID uint) (*db.TrainingRun, error) {
 func createMatch(trainingRun *db.TrainingRun, targetSlice int, network *db.Network, testonly bool, params string) error {
 	gameCap := config.Config.Matches.Games
 	if targetSlice == 0 {
-		gameCap *= 5
+		// gameCap *= 5
 	}
 	match := db.Match{
 		TrainingRunID: trainingRun.ID,
@@ -746,6 +748,28 @@ func uploadGame(c *gin.Context) {
 		log.Println(err.Error())
 		c.String(500, "Saving pgn")
 		return
+	}
+
+	timeNow := time.Now()
+	sub := timeNow.Sub(lastRefreshTime)
+	if int(sub.Seconds()) > 60 {
+		rows, err = db.GetDB().Raw(`REFRESH MATERIALIZED VIEW games_month`).Rows()
+		if err != nil {
+			log.Println(err.Error())
+			c.String(500, "refresh games_month")
+			return
+		}
+		rows.Close()
+
+		rows, err = db.GetDB().Raw(`REFRESH MATERIALIZED VIEW games_all`).Rows()
+		if err != nil {
+			log.Println(err.Error())
+			c.String(500, "refresh games_all")
+			return
+		}
+		rows.Close()
+
+		lastRefreshTime = time.Now()
 	}
 
 	c.String(http.StatusOK, fmt.Sprintf("File %s uploaded successfully with fields user=%s.", file.Filename, user.Username))
@@ -1326,7 +1350,7 @@ func frontPage(c *gin.Context) {
 		"top_users":       topUsers,
 		"progress":        progress,
 		"train_percent":   trainPercent,
-		"progress_info":   fmt.Sprintf("%d/32000", network.GamesPlayed),
+		"progress_info":   fmt.Sprintf("%d/80000", network.GamesPlayed),
 	})
 }
 
